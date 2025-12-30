@@ -4,6 +4,7 @@ import time
 import random
 import os
 import urllib.parse
+from io import BytesIO
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -69,9 +70,13 @@ class WhatsAppBot:
                 pass # Si no hay error, continuamos
 
             # Esperar a que el chat esté listo (caja de texto presente)
-            caja_texto = self.wait.until(
-                EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
-            )
+            try:
+                caja_texto = self.wait.until(
+                    EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+                )
+            except:
+                return "FALLIDO: Tiempo de carga excedido"
+                
             time.sleep(2) # Pequeña pausa humana
 
             # 3. Adjuntar Imagen (Si existe)
@@ -83,7 +88,6 @@ class WhatsAppBot:
                     time.sleep(1)
 
                     # Buscar el input oculto de tipo file y enviar la ruta
-                    # Nota: WhatsApp cambia sus XPaths a menudo. Buscamos el input genérico de archivo dentro del menú
                     input_img = self.driver.find_element(By.XPATH, '//input[@accept="image/*,video/mp4,video/3gpp,video/quicktime"]')
                     input_img.send_keys(os.path.abspath(imagen_path))
                     
@@ -113,113 +117,173 @@ class WhatsAppBot:
         if self.driver:
             self.driver.quit()
 
+# --- FUNCIONES AUXILIARES ---
+@st.cache_data
+def generar_plantilla():
+    # Crea un archivo en memoria para descargar
+    df_plantilla = pd.DataFrame({
+        "nombre": ["Juan Perez", "Maria Gomez"],
+        "telefono": ["573001234567", "573109876543"],
+        "segmento": ["Lider", "Voluntario"]
+    })
+    buffer = BytesIO()
+    # Guardamos como CSV en el buffer
+    df_plantilla.to_csv(buffer, index=False)
+    buffer.seek(0)
+    return buffer
+
 # --- INTERFAZ STREAMLIT ---
 
 st.title("📢 Gestor de Campañas WhatsApp")
 st.markdown("""
-Esta herramienta automatiza el envío de mensajes y medios. 
-**Nota:** Requiere mantener la ventana de Chrome abierta y el teléfono conectado.
+### Panel de Control de Envíos Masivos
+Utiliza esta herramienta para conectar con tu base de datos de ciudadanos.
 """)
 
 # Sidebar para configuración
 with st.sidebar:
     st.header("⚙️ Configuración")
-    velocidad_min = st.slider("Espera Mínima (seg)", 5, 20, 10)
-    velocidad_max = st.slider("Espera Máxima (seg)", 21, 60, 25)
+    st.write("Ajusta los tiempos para simular comportamiento humano y evitar bloqueos.")
+    velocidad_min = st.slider("Espera Mínima (seg)", 5, 20, 8)
+    velocidad_max = st.slider("Espera Máxima (seg)", 21, 60, 15)
     
-    st.info("💡 Mantén tiempos altos para evitar bloqueos por parte de WhatsApp.")
+    st.divider()
+    st.info("💡 **Tip:** Asegúrate de que los teléfonos incluyan el código de país (ej. 57 para Colombia) sin el signo +.")
 
-# Paso 1: Carga de Datos
-st.subheader("1. Base de Datos")
-uploaded_file = st.file_uploader("Sube tu archivo CSV o Excel", type=['csv', 'xlsx'])
+# --- SECCIÓN 1: GESTIÓN DE DATOS ---
+st.header("1. Carga de Base de Datos")
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.markdown("**¿No tienes el formato?**")
+    plantilla_csv = generar_plantilla()
+    st.download_button(
+        label="📥 Descargar Plantilla Ejemplo",
+        data=plantilla_csv,
+        file_name="plantilla_contactos.csv",
+        mime="text/csv",
+        help="Descarga este archivo para ver cómo organizar tus datos."
+    )
+
+with col2:
+    uploaded_file = st.file_uploader("Adjuntar archivo de contactos", type=['csv', 'xlsx'])
 
 if uploaded_file:
-    # Cargar DF
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-    
-    # Limpieza básica
-    df.columns = [c.lower().strip() for c in df.columns] # Normalizar columnas
-    
-    st.dataframe(df.head())
-    
-    col_telefono = st.selectbox("Columna de Teléfono", df.columns)
-    col_nombre = st.selectbox("Columna de Nombre", df.columns)
-    
-    # Validar formato
-    st.caption(f"Total de registros: {len(df)}")
+    # Lógica para leer CSV o Excel
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        
+        # Normalizar nombres de columnas (quitar espacios y poner en minuscula)
+        df.columns = [c.lower().strip() for c in df.columns]
+        
+        st.success(f"✅ Archivo cargado correctamente: {len(df)} contactos detectados.")
+        
+        # Validar columnas necesarias
+        col_opciones = df.columns.tolist()
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            col_telefono = st.selectbox("Selecciona la columna del TELÉFONO", col_opciones)
+        with c2:
+            col_nombre = st.selectbox("Selecciona la columna del NOMBRE", col_opciones)
 
-    # Paso 2: Mensaje
-    st.subheader("2. Componer Mensaje")
-    mensaje_template = st.text_area(
-        "Escribe tu mensaje (Usa {nombre} para personalizar)", 
-        height=150,
-        value="Hola {nombre}, te compartimos información importante de nuestra gestión."
-    )
-    
-    # Vista previa del mensaje
-    if not df.empty:
-        ejemplo_nombre = df.iloc[0][col_nombre]
-        st.info(f"Vista previa: {mensaje_template.format(nombre=ejemplo_nombre)}")
+        # Previsualización de datos
+        with st.expander("Ver primeros 5 registros"):
+            st.dataframe(df.head())
 
-    # Paso 3: Imagen (Opcional)
-    st.subheader("3. Multimedia (Opcional)")
-    imagen_file = st.file_uploader("Adjuntar imagen (JPG/PNG)", type=['png', 'jpg', 'jpeg'])
-    ruta_imagen = None
-    
-    if imagen_file:
-        # Guardar temporalmente la imagen para que Selenium la pueda leer
-        with open(os.path.join("temp_image.png"), "wb") as f:
-            f.write(imagen_file.getbuffer())
-        ruta_imagen = "temp_image.png"
-        st.image(imagen_file, width=200, caption="Imagen a enviar")
+    except Exception as e:
+        st.error(f"Error al leer el archivo: {e}")
 
-    # Paso 4: Ejecución
-    st.subheader("4. Ejecutar Campaña")
+    st.divider()
+
+    # --- SECCIÓN 2: COMPOSICIÓN ---
+    st.header("2. Redacción del Mensaje")
     
-    if st.button("🚀 INICIAR CAMPAÑA", type="primary"):
+    col_msg, col_img = st.columns([2, 1])
+    
+    with col_msg:
+        mensaje_template = st.text_area(
+            "Escribe el mensaje", 
+            height=150,
+            value="Hola {nombre}, queremos invitarte a conocer nuestras propuestas.",
+            help="Usa {nombre} para insertar automáticamente el nombre del contacto."
+        )
+        # Vista previa dinámica
+        if not df.empty:
+            ejemplo_nombre = df.iloc[0][col_nombre]
+            st.info(f"👁️ Vista previa: {mensaje_template.format(nombre=ejemplo_nombre)}")
+
+    with col_img:
+        st.write("**Adjuntar Imagen (Opcional)**")
+        imagen_file = st.file_uploader("Sube una imagen (JPG/PNG)", type=['png', 'jpg', 'jpeg'])
+        ruta_imagen = None
+        
+        if imagen_file:
+            # Guardar temporalmente
+            with open("temp_image.png", "wb") as f:
+                f.write(imagen_file.getbuffer())
+            ruta_imagen = "temp_image.png"
+            st.image(imagen_file, width=150, caption="Imagen lista")
+
+    st.divider()
+
+    # --- SECCIÓN 3: EJECUCIÓN ---
+    st.header("3. Iniciar Envío Masivo")
+    
+    st.warning("⚠️ Al iniciar, se abrirá una ventana de Chrome. No la cierres ni la minimices totalmente.")
+    
+    if st.button("🚀 INICIAR CAMPAÑA AHORA", type="primary"):
         bot = WhatsAppBot()
-        st.write("Iniciando navegador...")
+        st.write("Iniciando motor de WhatsApp...")
         
         if bot.iniciar_driver():
-            st.warning("⚠️ Por favor escanea el código QR en la ventana que se abrió.")
+            st.info("👉 Escanea el código QR en la nueva ventana de Chrome.")
             
-            # Esperar login
+            # Espera de login
             placeholders = st.empty()
-            placeholders.info("Esperando escaneo de QR...")
             
-            try:
-                WebDriverWait(bot.driver, 60).until(
-                    EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="3"]'))
-                )
-                placeholders.success("¡Sesión iniciada! Comenzando envíos...")
-                time.sleep(3)
+            # Intentamos detectar si ya cargó
+            waited = 0
+            login_success = False
+            while waited < 60:
+                if bot.esperar_qr():
+                    login_success = True
+                    break
+                time.sleep(1)
+                waited += 1
+            
+            if login_success:
+                placeholders.success("¡Conectado! Enviando mensajes...")
+                time.sleep(2)
                 
-                # Barra de progreso
                 progreso = st.progress(0)
                 status_text = st.empty()
-                
                 resultados = []
+                
+                total_envios = len(df)
                 
                 for index, row in df.iterrows():
                     nombre = str(row[col_nombre])
-                    # Limpieza agresiva de teléfono
-                    telefono = ''.join(filter(str.isdigit, str(row[col_telefono])))
+                    telefono_raw = str(row[col_telefono])
+                    # Limpieza básica de teléfono (solo digitos)
+                    telefono = ''.join(filter(str.isdigit, telefono_raw))
                     
-                    # Personalizar
+                    # Personalización
                     try:
-                        mensaje_final = mensaje_template.format(nombre=nombre.split()[0].title())
+                        primer_nombre = nombre.split()[0].title()
+                        mensaje_final = mensaje_template.format(nombre=primer_nombre)
                     except:
-                        mensaje_final = mensaje_template # Fallback si falla el format
+                        mensaje_final = mensaje_template
                     
-                    status_text.text(f"Procesando {index+1}/{len(df)}: {nombre}...")
+                    status_text.text(f"⏳ Enviando {index+1}/{total_envios} a: {nombre}")
                     
-                    # ENVIAR
+                    # Acción de envío
                     estado = bot.enviar_mensaje(telefono, mensaje_final, ruta_imagen)
                     
-                    # Guardar log
                     resultados.append({
                         "Nombre": nombre,
                         "Telefono": telefono,
@@ -227,34 +291,38 @@ if uploaded_file:
                         "Hora": datetime.now().strftime("%H:%M:%S")
                     })
                     
-                    # Actualizar progreso
-                    progreso.progress((index + 1) / len(df))
+                    progreso.progress((index + 1) / total_envios)
                     
-                    # Espera aleatoria (Anti-Ban)
-                    tiempo_espera = random.uniform(velocidad_min, velocidad_max)
-                    time.sleep(tiempo_espera)
+                    # Pausa Anti-Bloqueo
+                    if index < total_envios - 1: # No esperar en el último
+                        espera = random.uniform(velocidad_min, velocidad_max)
+                        time.sleep(espera)
                 
                 bot.cerrar()
-                st.success("✅ Campaña finalizada")
+                status_text.text("✅ Proceso completado.")
                 
-                # Mostrar resultados y permitir descarga
+                # Resultados Finales
                 df_res = pd.DataFrame(resultados)
+                st.subheader("📊 Reporte de Resultados")
                 st.dataframe(df_res)
                 
-                csv = df_res.to_csv(index=False).encode('utf-8')
+                # Botón descarga reporte
+                csv_res = df_res.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="Descargar Reporte de Envío",
-                    data=csv,
-                    file_name='reporte_envios_whatsapp.csv',
+                    label="📥 Descargar Reporte Final",
+                    data=csv_res,
+                    file_name=f'reporte_envios_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
                     mime='text/csv',
                 )
                 
-                # Limpiar imagen temp
+                # Limpieza
                 if ruta_imagen and os.path.exists(ruta_imagen):
                     os.remove(ruta_imagen)
-                    
-            except Exception as e:
-                st.error(f"Error durante la ejecución: {e}")
+            else:
+                st.error("No se detectó el inicio de sesión (QR). Intenta de nuevo.")
                 bot.cerrar()
         else:
-            st.error("No se pudo iniciar el navegador Chrome.")
+            st.error("Error crítico al abrir el navegador.")
+
+else:
+    st.info("👆 Sube un archivo CSV o Excel en la sección 1 para comenzar.")
